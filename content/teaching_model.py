@@ -98,7 +98,7 @@ def preflight(p=Parameters(), safety=0.20):
                 planned_morphodynamic_number=diffusivity*dt_selected/p.dx_m**2,
                 dt_will_be_limited=bool(p.max_dt_s>dt_limit), safety=safety)
 
-def simulate(p=Parameters(), max_cells=500, max_steps=150000):
+def _simulate_steps(p=Parameters(), max_cells=500, max_steps=150000):
     check(p)
     n = int(round(p.length_m/p.dx_m))
     if n > max_cells:
@@ -112,6 +112,16 @@ def simulate(p=Parameters(), max_cells=500, max_steps=150000):
     t = 0.0
     times = [t]
     profiles = [eta.copy()]
+    # Store diagnostics only at requested output times, not every solver step.
+    saved_depth, saved_velocity, saved_shields, saved_slope, saved_transport = [], [], [], [], []
+    def snapshot():
+        q, h, theta, slope = fluxes(eta, p, feed)
+        saved_depth.append(h.copy())
+        saved_velocity.append((p.discharge_m3s / (p.width_m * h)).copy())
+        saved_shields.append(theta.copy())
+        saved_slope.append(slope.copy())
+        saved_transport.append(q.copy())
+    snapshot()
     target_times = np.linspace(0,p.duration_s,p.save_count)[1:]
     net_sediment_volume = 0.0
     steps = 0
@@ -137,16 +147,59 @@ def simulate(p=Parameters(), max_cells=500, max_steps=150000):
             net_sediment_volume += p.width_m*(q[0]-q[-1])*dt
             t += dt
             steps += 1
+            yield (t, p.duration_s, steps)
             if steps > max_steps: raise RuntimeError('Exceeded classroom step limit')
         times.append(t)
         profiles.append(eta.copy())
+        snapshot()
     q,depth,shields,slope = fluxes(eta,p,feed)
     storage = (1-p.porosity)*p.width_m*p.dx_m*np.sum(eta-profiles[0])
     return {'x_m':x,'times_s':np.array(times),'bed_m':np.array(profiles),
             'depth_faces_m':depth,'shields_faces':shields,'slope_faces':slope,
+            'depth_history_faces_m':np.array(saved_depth),
+            'velocity_history_faces_ms':np.array(saved_velocity),
+            'shields_history_faces':np.array(saved_shields),
+            'slope_history_faces':np.array(saved_slope),
+            'transport_history_faces_m2s':np.array(saved_transport),
             'transport_faces_m2s':q,'feed_m2s':feed,'steps':steps,
             'storage_change_m3':storage,'net_boundary_input_m3':net_sediment_volume,
             'mass_balance_error_m3':storage-net_sediment_volume}
+
+
+
+def simulate(p=Parameters(), max_cells=500, max_steps=150000):
+    """Synchronous API, retained for existing scripts and tests."""
+    engine = _simulate_steps(p, max_cells, max_steps)
+    while True:
+        try:
+            next(engine)
+        except StopIteration as done:
+            return done.value
+
+
+async def simulate_with_progress(p=Parameters(), progress=None, max_cells=500,
+                                 max_steps=150000, update_every=25):
+    """Browser-friendly solver: periodically yield to the notebook UI.
+
+    progress(fraction, elapsed_seconds, step_count) is optional. Yielding to
+    asyncio allows the displayed progress bar to repaint during a run.
+    """
+    import asyncio
+    engine = _simulate_steps(p, max_cells, max_steps)
+    if progress is not None:
+        progress(0.0, 0.0, 0)
+    while True:
+        try:
+            elapsed, duration, steps = next(engine)
+        except StopIteration as done:
+            if progress is not None:
+                progress(1.0, p.duration_s, steps if 'steps' in locals() else 0)
+            return done.value
+        if steps % update_every == 0:
+            if progress is not None:
+                progress(min(1.0, elapsed/duration) if duration else 1.0, elapsed, steps)
+            await asyncio.sleep(0.01)
+
 
 
 def classroom_estimate(p=Parameters()):
