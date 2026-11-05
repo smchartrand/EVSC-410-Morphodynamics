@@ -21,7 +21,7 @@ class Parameters:
     critical_shields: float = 0.045
     feed_ratio: float = 1.0
     duration_s: float = 1800.0
-    max_dt_s: float = 2.0
+    max_dt_s: float = 3600.0  # automatic adaptive step; generous safety ceiling
     save_count: int = 7
 
 
